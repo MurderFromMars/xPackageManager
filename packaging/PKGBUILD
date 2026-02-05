@@ -12,26 +12,40 @@ depends=(
     'polkit'
     'fontconfig'
     'freetype2'
+    'qt6-base'
 )
 makedepends=(
     'rust'
     'cargo'
-    'cmake'
+    'qt6-base'
 )
 provides=('xpackagemanager')
 conflicts=('xpackagemanager-git')
 source=()
 sha256sums=()
 
-build() {
-    cd "$srcdir/.."
+# Project root is one directory up from packaging/
+_projectdir="$startdir/.."
 
-    # Build release binary
+build() {
+    cd "$_projectdir"
+
+    # Use Qt6 for native system theme integration
+    export QMAKE=qmake6
+
+    # Strip -flto flags from C/CXX flags — LTO breaks the cpp crate's
+    # struct metadata extraction used by qttypes (Slint Qt backend)
+    export CFLAGS="${CFLAGS//-flto=auto/}"
+    export CXXFLAGS="${CXXFLAGS//-flto=auto/}"
+    export CFLAGS="${CFLAGS//-flto/}"
+    export CXXFLAGS="${CXXFLAGS//-flto/}"
+
+    # Build optimized release binary
     cargo build --release --bin xpackagemanager
 }
 
 package() {
-    cd "$srcdir/.."
+    cd "$_projectdir"
 
     # Install binary
     install -Dm755 "target/release/xpackagemanager" "$pkgdir/usr/bin/xpackagemanager"
@@ -47,6 +61,9 @@ package() {
 
     # Install polkit policy
     install -Dm644 "packaging/org.xpackagemanager.policy" "$pkgdir/usr/share/polkit-1/actions/org.xpackagemanager.policy"
+
+    # Clean up build artifacts
+    cargo clean
 }
 
 post_install() {

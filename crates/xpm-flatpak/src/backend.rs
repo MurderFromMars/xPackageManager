@@ -3,18 +3,17 @@
 use crate::remote::RemoteManager;
 use async_trait::async_trait;
 use libflatpak::{gio, prelude::*, Installation, RefKind};
-use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 use xpm_core::{
     error::{Error, Result},
-    operation::{Operation, OperationKind, OperationProgress, OperationResult, OperationStatus},
+    operation::{Operation, OperationKind, OperationResult},
     package::{Package, PackageBackend, PackageInfo, PackageStatus, SearchResult, UpdateInfo, Version},
     source::{PackageSource, ProgressCallback},
 };
 
 /// The Flatpak backend.
 pub struct FlatpakBackend {
-    remote_manager: RemoteManager,
+    _remote_manager: RemoteManager,
 }
 
 // Flatpak/GLib types are not Send/Sync, so we handle them carefully.
@@ -25,7 +24,7 @@ impl FlatpakBackend {
     /// Creates a new Flatpak backend.
     pub fn new() -> Result<Self> {
         Ok(Self {
-            remote_manager: RemoteManager::new(),
+            _remote_manager: RemoteManager::new(),
         })
     }
 
@@ -39,23 +38,6 @@ impl FlatpakBackend {
     fn get_system_installation() -> Result<Installation> {
         Installation::new_system(gio::Cancellable::NONE)
             .map_err(|e| Error::BackendUnavailable(format!("System installation: {}", e)))
-    }
-
-    /// Converts an InstalledRef to our Package type.
-    fn convert_installed_ref(
-        name: &str,
-        version: &str,
-        description: &str,
-        origin: &str,
-    ) -> Package {
-        Package::new(
-            name,
-            Version::new(version),
-            description,
-            PackageBackend::Flatpak,
-            PackageStatus::Installed,
-            origin,
-        )
     }
 
     /// Lists all available Flatpak apps from configured remotes (e.g., Flathub).

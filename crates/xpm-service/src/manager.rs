@@ -30,7 +30,7 @@ pub struct PackageManager {
     alpm: Option<Arc<AlpmBackend>>,
     flatpak: Option<Arc<FlatpakBackend>>,
     state: Arc<RwLock<AppState>>,
-    progress_tracker: Arc<Mutex<ProgressTracker>>,
+    _progress_tracker: Arc<Mutex<ProgressTracker>>,
     progress_tx: broadcast::Sender<ProgressMessage>,
 }
 
@@ -66,7 +66,7 @@ impl PackageManager {
             alpm,
             flatpak,
             state: Arc::new(RwLock::new(AppState::new())),
-            progress_tracker: Arc::new(Mutex::new(ProgressTracker::new())),
+            _progress_tracker: Arc::new(Mutex::new(ProgressTracker::new())),
             progress_tx,
         })
     }

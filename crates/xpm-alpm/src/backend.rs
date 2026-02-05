@@ -1,15 +1,13 @@
 //! ALPM backend implementation.
 
 use crate::cache::CacheManager;
-use crate::orphan::OrphanDetector;
 use alpm::{Alpm, SigLevel};
 use async_trait::async_trait;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 use xpm_core::{
     error::{Error, Result},
-    operation::{Operation, OperationKind, OperationProgress, OperationResult, OperationStatus},
+    operation::{Operation, OperationKind, OperationResult},
     package::{
         InstallReason, Package, PackageBackend, PackageInfo, PackageStatus, SearchResult,
         UpdateInfo, Version,
@@ -86,43 +84,6 @@ impl AlpmBackend {
         })
     }
 
-    /// Creates an ALPM handle (must be called from blocking context).
-    fn create_handle(root: String, dbpath: String) -> Result<Alpm> {
-        let handle = Alpm::new(root, dbpath)
-            .map_err(|e| Error::DatabaseError(format!("Failed to initialize ALPM: {}", e)))?;
-
-        // Register common Arch repos.
-        let repos = ["core", "extra", "multilib"];
-        let siglevel = SigLevel::PACKAGE_OPTIONAL | SigLevel::DATABASE_OPTIONAL;
-
-        for repo in repos {
-            if let Err(e) = handle.register_syncdb(repo, siglevel) {
-                warn!("Failed to register {}: {}", repo, e);
-            } else {
-                debug!("Registered sync database: {}", repo);
-            }
-        }
-
-        Ok(handle)
-    }
-
-    /// Converts an ALPM package to our Package type.
-    fn convert_package(
-        name: &str,
-        version: &str,
-        desc: &str,
-        repo: &str,
-        status: PackageStatus,
-    ) -> Package {
-        Package::new(
-            name,
-            Version::new(version),
-            desc,
-            PackageBackend::Pacman,
-            status,
-            repo,
-        )
-    }
 }
 
 #[async_trait]

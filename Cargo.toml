@@ -17,11 +17,11 @@ repository = "https://github.com/example/xpackagemanager"
 
 [workspace.dependencies]
 # Async runtime
-tokio = { version = "1.43", features = ["full"] }
+tokio = { version = "1.43", features = ["rt", "rt-multi-thread", "sync", "macros"] }
 async-trait = "0.1"
 
 # UI Framework - Slint
-slint = "1.9"
+slint = { version = "1.9", default-features = false, features = ["backend-qt", "backend-winit", "renderer-femtovg", "compat-1-2"] }
 
 # Package manager backends
 alpm = "5.0"
@@ -37,7 +37,7 @@ serde_json = "1.0"
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = "0.3"
 
 # Internal crates
 xpm-core = { path = "crates/xpm-core" }
@@ -46,6 +46,8 @@ xpm-flatpak = { path = "crates/xpm-flatpak" }
 xpm-service = { path = "crates/xpm-service" }
 
 [profile.release]
+opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
+panic = "abort"

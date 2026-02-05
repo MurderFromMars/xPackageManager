@@ -1,6 +1,6 @@
 //! xPackageManager - A modern package manager for Arch Linux.
 
-use slint::{ModelRc, SharedString, VecModel, Timer, TimerMode};
+use slint::{Model, ModelRc, SharedString, VecModel, Timer, TimerMode};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
@@ -39,7 +39,35 @@ enum UiMessage {
     TerminalOutput(String),
     TerminalDone(bool),
     HideTerminal,
+    // Progress popup messages
+    ShowProgressPopup(String),
+    OperationProgress(i32, String),
+    OperationDone(bool),
+    ShowTerminalFallback(String),
 }
+
+/// Patterns that indicate pacman is asking for confirmation (auto-answer "y")
+const PACMAN_CONFIRM_PATTERNS: &[&str] = &[
+    "Proceed with installation?",
+    "Proceed with download?",
+    ":: Proceed with installation?",
+    ":: Proceed with download?",
+    "Do you want to remove these packages?",
+    ":: Do you want to remove these packages?",
+    "[Y/n]",
+    "[y/N]",
+];
+
+/// Patterns that indicate a conflict or error requiring user intervention
+const CONFLICT_PATTERNS: &[&str] = &[
+    "conflicting files",
+    "are in conflict",
+    ":: Replace",
+    "error:",
+    "exists in filesystem",
+    "breaks dependency",
+    "could not satisfy dependencies",
+];
 
 /// Check if a file path is a valid Arch Linux package
 fn is_arch_package(path: &str) -> bool {
@@ -92,6 +120,7 @@ fn get_local_package_info(path: &str) -> Option<PackageData> {
         dependencies: SharedString::from(""),
         required_by: SharedString::from(""),
         icon_name: SharedString::from("package"),
+        selected: false,
     })
 }
 
@@ -108,12 +137,11 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-/// Strip ANSI escape sequences and handle carriage returns for clean display.
+/// Strip ANSI escape sequences for clean display.
 /// Handles CSI sequences (ESC[...), OSC (ESC]...), and simple ESC+char sequences.
-/// Carriage returns simulate terminal behavior: \r overwrites from start of current line.
+/// Normalizes PTY line endings (\r\n → \n). Bare \r (progress bars) is preserved.
 fn strip_ansi(input: &str) -> String {
-    // First pass: strip all escape sequences
-    let mut stripped = String::with_capacity(input.len());
+    let mut result = String::with_capacity(input.len());
     let bytes = input.as_bytes();
     let len = bytes.len();
     let mut i = 0;
@@ -125,53 +153,73 @@ fn strip_ansi(input: &str) -> String {
                 b'[' => {
                     // CSI sequence: ESC[ (params) (intermediates) final_byte
                     i += 1;
-                    // Skip parameter bytes (0x30-0x3F) including digits, semicolons, ? etc
                     while i < len && bytes[i] >= 0x30 && bytes[i] <= 0x3F { i += 1; }
-                    // Skip intermediate bytes (0x20-0x2F)
                     while i < len && bytes[i] >= 0x20 && bytes[i] <= 0x2F { i += 1; }
-                    // Skip final byte (0x40-0x7E)
                     if i < len && bytes[i] >= 0x40 && bytes[i] <= 0x7E { i += 1; }
                 }
                 b']' => {
                     // OSC sequence: ESC] ... (BEL or ST)
                     i += 1;
                     while i < len {
-                        if bytes[i] == 0x07 { i += 1; break; } // BEL
+                        if bytes[i] == 0x07 { i += 1; break; }
                         if bytes[i] == 0x1b && i + 1 < len && bytes[i + 1] == b'\\' {
-                            i += 2; break; // ST
+                            i += 2; break;
                         }
                         i += 1;
                     }
                 }
                 b'(' | b')' | b'*' | b'+' => {
-                    // Character set designation: ESC(X — skip the next byte
                     i += 1;
                     if i < len { i += 1; }
                 }
                 _ => {
-                    // Other single-char ESC sequences (ESC=, ESC>, etc.)
                     i += 1;
                 }
             }
+        } else if bytes[i] == b'\r' && i + 1 < len && bytes[i + 1] == b'\n' {
+            // \r\n is a PTY line ending — emit just \n
+            result.push('\n');
+            i += 2;
         } else {
-            stripped.push(bytes[i] as char);
+            result.push(bytes[i] as char);
             i += 1;
         }
     }
+    result
+}
 
-    // Second pass: handle \r (carriage return) — overwrites from line start
-    let mut result = String::with_capacity(stripped.len());
-    for line in stripped.split('\n') {
-        if !result.is_empty() {
-            result.push('\n');
-        }
-        // If line contains \r, only keep content after the last \r
-        if let Some(pos) = line.rfind('\r') {
-            result.push_str(&line[pos + 1..]);
-        } else {
-            result.push_str(line);
+/// Simulate terminal carriage-return behavior on a text buffer.
+/// `\r` resets the write position to the start of the current line (overwrite in-place).
+/// `\n` commits the current line and starts a new one.
+/// Only the last line can be affected, so the prefix before it is copied as-is.
+fn apply_terminal_text(buffer: &str, new_text: &str) -> String {
+    // Only the last line is affected by \r — keep everything before it unchanged
+    let (prefix, current_line) = match buffer.rfind('\n') {
+        Some(pos) => (&buffer[..pos + 1], &buffer[pos + 1..]),
+        None => ("", buffer),
+    };
+
+    let mut line = current_line.to_string();
+    let mut result = String::with_capacity(buffer.len() + new_text.len());
+    result.push_str(prefix);
+
+    for ch in new_text.chars() {
+        match ch {
+            '\n' => {
+                result.push_str(&line);
+                result.push('\n');
+                line.clear();
+            }
+            '\r' => {
+                line.clear();
+            }
+            c => {
+                line.push(c);
+            }
         }
     }
+
+    result.push_str(&line);
     result
 }
 
@@ -189,11 +237,16 @@ fn spawn_in_pty(cmd: &str, args: &[&str]) -> Result<(i32, u32), String> {
     }
 
     let child: Result<std::process::Child, std::io::Error> = unsafe {
+        // Each Stdio::from_raw_fd takes ownership, so dup for each to avoid double-close
+        let stdin_fd = libc::dup(slave);
+        let stdout_fd = libc::dup(slave);
+        let stderr_fd = libc::dup(slave);
         std::process::Command::new(cmd)
             .args(args)
-            .stdin(std::process::Stdio::from_raw_fd(slave))
-            .stdout(std::process::Stdio::from_raw_fd(slave))
-            .stderr(std::process::Stdio::from_raw_fd(slave))
+            .env("TERM", "xterm-256color")
+            .stdin(std::process::Stdio::from_raw_fd(stdin_fd))
+            .stdout(std::process::Stdio::from_raw_fd(stdout_fd))
+            .stderr(std::process::Stdio::from_raw_fd(stderr_fd))
             .pre_exec(move || {
                 libc::setsid();
                 libc::ioctl(slave, libc::TIOCSCTTY, 0);
@@ -202,7 +255,7 @@ fn spawn_in_pty(cmd: &str, args: &[&str]) -> Result<(i32, u32), String> {
             .spawn()
     };
 
-    // Close slave in parent
+    // Close original slave in parent (dup'd copies are owned by Stdio)
     unsafe { libc::close(slave); }
 
     match child {
@@ -307,6 +360,244 @@ fn run_in_terminal(
     let _ = tx.send(UiMessage::TerminalDone(success));
 }
 
+/// Build command and args for a package operation
+fn build_pacman_command(action: &str, names: &[String], backend: i32) -> (String, Vec<String>) {
+    match (action, backend) {
+        ("install", 1) | ("bulk-install", 1) => {
+            ("flatpak".to_string(), {
+                let mut args = vec!["install".to_string(), "-y".to_string()];
+                args.extend(names.iter().cloned());
+                args
+            })
+        }
+        ("remove", 1) | ("bulk-remove", 1) => {
+            ("flatpak".to_string(), {
+                let mut args = vec!["uninstall".to_string(), "-y".to_string()];
+                args.extend(names.iter().cloned());
+                args
+            })
+        }
+        ("update", 1) => {
+            ("flatpak".to_string(), {
+                let mut args = vec!["update".to_string(), "-y".to_string()];
+                args.extend(names.iter().cloned());
+                args
+            })
+        }
+        ("remove", _) | ("bulk-remove", _) => {
+            ("pkexec".to_string(), {
+                let mut args = vec!["pacman".to_string(), "-R".to_string()];
+                args.extend(names.iter().cloned());
+                args
+            })
+        }
+        ("update-all", _) => {
+            ("pkexec".to_string(), vec!["pacman".to_string(), "-Syu".to_string()])
+        }
+        _ => {
+            // install, bulk-install, update for pacman
+            ("pkexec".to_string(), {
+                let mut args = vec!["pacman".to_string(), "-S".to_string()];
+                args.extend(names.iter().cloned());
+                args
+            })
+        }
+    }
+}
+
+/// Run a managed operation with progress tracking and auto-confirmation.
+/// Falls back to full terminal on conflict/error.
+fn run_managed_operation(
+    tx: &mpsc::Sender<UiMessage>,
+    title: &str,
+    action: &str,
+    names: &[String],
+    backend: i32,
+    input_sender: &Arc<Mutex<Option<mpsc::Sender<String>>>>,
+    pid_holder: &Arc<Mutex<Option<u32>>>,
+) {
+    let _ = tx.send(UiMessage::ShowProgressPopup(title.to_string()));
+
+    let (cmd, args) = build_pacman_command(action, names, backend);
+    let args_str: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+    let (master_fd, child_pid) = match spawn_in_pty(&cmd, &args_str) {
+        Ok(pair) => pair,
+        Err(e) => {
+            let _ = tx.send(UiMessage::OperationProgress(0, format!("Error: {}", e)));
+            let _ = tx.send(UiMessage::OperationDone(false));
+            return;
+        }
+    };
+
+    *pid_holder.lock().unwrap() = Some(child_pid);
+
+    // Create input channel for auto-confirm
+    let (in_tx, in_rx) = mpsc::channel::<String>();
+    *input_sender.lock().unwrap() = Some(in_tx.clone());
+
+    // Shared state for escalation
+    let escalated = Arc::new(Mutex::new(false));
+    let output_buffer = Arc::new(Mutex::new(String::new()));
+
+    // Reader thread: parse output for progress/conflicts
+    let tx_reader = tx.clone();
+    let master_fd_reader = master_fd;
+    let escalated_r = escalated.clone();
+    let output_buffer_r = output_buffer.clone();
+    let in_tx_r = in_tx;
+    let total_packages = names.len().max(1);
+
+    let reader_handle = thread::spawn(move || {
+        use std::io::Read;
+        let mut file = unsafe { std::fs::File::from_raw_fd(master_fd_reader) };
+        let mut buf = [0u8; 4096];
+        let mut current_percent: i32 = 0;
+
+        loop {
+            match file.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let text = String::from_utf8_lossy(&buf[..n]);
+                    let cleaned = strip_ansi(&text);
+                    if cleaned.is_empty() {
+                        continue;
+                    }
+
+                    // Accumulate output
+                    output_buffer_r.lock().unwrap().push_str(&cleaned);
+
+                    let is_escalated = *escalated_r.lock().unwrap();
+
+                    if is_escalated {
+                        // Already escalated — forward to terminal
+                        let _ = tx_reader.send(UiMessage::TerminalOutput(cleaned));
+                    } else {
+                        // Check for conflicts/errors
+                        let lower = cleaned.to_lowercase();
+                        let has_conflict = CONFLICT_PATTERNS.iter().any(|p| lower.contains(&p.to_lowercase()));
+
+                        if has_conflict {
+                            // Escalate to terminal
+                            *escalated_r.lock().unwrap() = true;
+                            let accumulated = output_buffer_r.lock().unwrap().clone();
+                            let _ = tx_reader.send(UiMessage::ShowTerminalFallback(accumulated));
+                            continue;
+                        }
+
+                        // Auto-confirm prompts
+                        let has_prompt = PACMAN_CONFIRM_PATTERNS.iter().any(|p| cleaned.contains(p));
+                        if has_prompt {
+                            let _ = in_tx_r.send("y".to_string());
+                        }
+
+                        // Stage detection for progress
+                        for line in cleaned.lines() {
+                            let lower_line = line.to_lowercase();
+                            let new_percent = if lower_line.contains("resolving dependencies") {
+                                10
+                            } else if lower_line.contains("looking for conflicting") {
+                                15
+                            } else if lower_line.contains("downloading") {
+                                // Try to parse (X/Y) for proportional progress
+                                parse_progress_fraction(line, 25, 55, total_packages)
+                                    .unwrap_or(35)
+                            } else if lower_line.contains("checking keyring") || lower_line.contains("checking integrity") {
+                                55
+                            } else if lower_line.contains("checking package integrity") {
+                                58
+                            } else if lower_line.contains("loading package files") {
+                                60
+                            } else if lower_line.contains("installing") || lower_line.contains("upgrading") || lower_line.contains("removing") {
+                                parse_progress_fraction(line, 60, 88, total_packages)
+                                    .unwrap_or(75)
+                            } else if lower_line.contains("running post-transaction hooks") {
+                                90
+                            } else {
+                                current_percent
+                            };
+
+                            if new_percent > current_percent {
+                                current_percent = new_percent;
+                                let stage = line.trim().to_string();
+                                let _ = tx_reader.send(UiMessage::OperationProgress(current_percent, stage));
+                            }
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        std::mem::forget(file);
+    });
+
+    // Writer thread
+    let master_fd_writer = master_fd;
+    let writer_handle = thread::spawn(move || {
+        use std::io::Write;
+        let dup_fd = unsafe { libc::dup(master_fd_writer) };
+        if dup_fd < 0 {
+            return;
+        }
+        let mut file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
+        while let Ok(input) = in_rx.recv() {
+            let data = format!("{}\n", input);
+            if file.write_all(data.as_bytes()).is_err() {
+                break;
+            }
+            let _ = file.flush();
+        }
+    });
+
+    // Wait for child
+    let status = unsafe {
+        let mut wstatus: libc::c_int = 0;
+        libc::waitpid(child_pid as libc::pid_t, &mut wstatus, 0);
+        wstatus
+    };
+
+    let success = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
+
+    *pid_holder.lock().unwrap() = None;
+    *input_sender.lock().unwrap() = None;
+
+    unsafe { libc::close(master_fd); }
+
+    let _ = reader_handle.join();
+    let _ = writer_handle.join();
+
+    let was_escalated = *escalated.lock().unwrap();
+    if was_escalated {
+        // Already in terminal mode
+        let _ = tx.send(UiMessage::TerminalDone(success));
+    } else {
+        let _ = tx.send(UiMessage::OperationDone(success));
+    }
+}
+
+/// Parse "(X/Y)" fraction from a line and map it to a progress range
+fn parse_progress_fraction(line: &str, range_start: i32, range_end: i32, _total_packages: usize) -> Option<i32> {
+    // Look for pattern like "(1/5)" or "( 1/ 5)"
+    if let Some(start) = line.find('(') {
+        if let Some(end) = line[start..].find(')') {
+            let inner = &line[start + 1..start + end];
+            let parts: Vec<&str> = inner.split('/').collect();
+            if parts.len() == 2 {
+                if let (Ok(current), Ok(total)) = (
+                    parts[0].trim().parse::<i32>(),
+                    parts[1].trim().parse::<i32>(),
+                ) {
+                    if total > 0 {
+                        let fraction = current as f64 / total as f64;
+                        return Some(range_start + ((range_end - range_start) as f64 * fraction) as i32);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Convert a Package to PackageData for the UI
 fn package_to_ui(pkg: &xpm_core::package::Package, has_update: bool, desktop_map: &HashMap<String, String>) -> PackageData {
     let backend = match pkg.backend {
@@ -334,6 +625,7 @@ fn package_to_ui(pkg: &xpm_core::package::Package, has_update: bool, desktop_map
         dependencies: SharedString::from(""),
         required_by: SharedString::from(""),
         icon_name: SharedString::from(""),
+        selected: false,
     }
 }
 
@@ -365,7 +657,60 @@ fn update_to_ui(update: &xpm_core::package::UpdateInfo) -> PackageData {
         dependencies: SharedString::from(""),
         required_by: SharedString::from(""),
         icon_name: SharedString::from(""),
+        selected: false,
     }
+}
+
+/// Helper to update the `selected` field in a VecModel
+fn update_selection_in_model(model: &ModelRc<PackageData>, name: &str, backend: i32, selected: bool) {
+    let model = model.as_any().downcast_ref::<VecModel<PackageData>>();
+    if let Some(vec_model) = model {
+        for i in 0..vec_model.row_count() {
+            if let Some(mut row) = vec_model.row_data(i) {
+                if row.name.as_str() == name && row.backend == backend {
+                    row.selected = selected;
+                    vec_model.set_row_data(i, row);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Look up whether a package is installed by searching all models
+fn find_package_installed(window: &MainWindow, name: &str, backend: i32) -> bool {
+    let models: Vec<ModelRc<PackageData>> = vec![
+        window.get_installed_packages(),
+        window.get_update_packages(),
+        window.get_search_packages(),
+        window.get_flatpak_packages(),
+        window.get_firmware_packages(),
+        window.get_category_packages(),
+        window.get_repo_packages(),
+    ];
+    for model in &models {
+        if let Some(vec_model) = model.as_any().downcast_ref::<VecModel<PackageData>>() {
+            for i in 0..vec_model.row_count() {
+                if let Some(row) = vec_model.row_data(i) {
+                    if row.name.as_str() == name && row.backend == backend {
+                        return row.installed;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Update selection state across all package models in the window
+fn update_selection_in_models(window: &MainWindow, name: &str, backend: i32, selected: bool) {
+    update_selection_in_model(&window.get_installed_packages(), name, backend, selected);
+    update_selection_in_model(&window.get_update_packages(), name, backend, selected);
+    update_selection_in_model(&window.get_search_packages(), name, backend, selected);
+    update_selection_in_model(&window.get_flatpak_packages(), name, backend, selected);
+    update_selection_in_model(&window.get_firmware_packages(), name, backend, selected);
+    update_selection_in_model(&window.get_category_packages(), name, backend, selected);
+    update_selection_in_model(&window.get_repo_packages(), name, backend, selected);
 }
 
 fn main() {
@@ -396,6 +741,9 @@ fn main() {
     let terminal_input_sender: Arc<Mutex<Option<mpsc::Sender<String>>>> = Arc::new(Mutex::new(None));
     let terminal_child_pid: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
 
+    // Selection tracking: Vec of (name, backend, installed)
+    let selected_packages: Rc<RefCell<Vec<(String, i32, bool)>>> = Rc::new(RefCell::new(Vec::new()));
+
     // Create backend thread sender
     let tx_load = tx.clone();
     let tx_search = tx.clone();
@@ -404,8 +752,15 @@ fn main() {
     let timer = Timer::default();
     let window_weak = window.as_weak();
     let rx_clone = rx.clone();
+    let tx_timer = tx.clone();
+    // Terminal output state persisted across timer ticks
+    let mut pending_terminal = String::new();
+    let mut last_term_flush = std::time::Instant::now();
+
     timer.start(TimerMode::Repeated, std::time::Duration::from_millis(50), move || {
         if let Some(window) = window_weak.upgrade() {
+            let mut flush_now = false;
+
             while let Ok(msg) = rx_clone.borrow_mut().try_recv() {
                 match msg {
                     UiMessage::PackagesLoaded { installed, updates, flatpak, firmware, stats } => {
@@ -449,26 +804,113 @@ fn main() {
                         window.set_terminal_done(false);
                         window.set_terminal_success(false);
                         window.set_show_terminal(true);
+                        pending_terminal.clear();
                     }
                     UiMessage::TerminalOutput(text) => {
-                        let current = window.get_terminal_output().to_string();
-                        let combined = format!("{}{}", current, text);
-                        // Limit buffer size to last ~64KB
-                        let trimmed = if combined.len() > 65536 {
-                            combined[combined.len() - 65536..].to_string()
-                        } else {
-                            combined
-                        };
-                        window.set_terminal_output(SharedString::from(&trimmed));
+                        pending_terminal.push_str(&text);
                     }
                     UiMessage::TerminalDone(success) => {
+                        flush_now = true;
                         window.set_terminal_done(true);
                         window.set_terminal_success(success);
+                        // Live-update all package lists after install/remove
+                        if success {
+                            let tx = tx_timer.clone();
+                            let search_query = window.get_search_text().to_string();
+                            let current_view = window.get_view();
+                            let current_repo = window.get_current_repo_name().to_string();
+                            thread::spawn(move || {
+                                let rt = tokio::runtime::Runtime::new().expect("Runtime");
+                                rt.block_on(async {
+                                    load_packages_async(&tx).await;
+                                    // Re-run search so Install/Remove buttons update
+                                    if !search_query.is_empty() {
+                                        search_packages_async(&tx, &search_query).await;
+                                    }
+                                });
+                                // Re-load repo view if active
+                                if current_view == 8 && !current_repo.is_empty() {
+                                    load_repo_packages(&tx, &current_repo);
+                                }
+                            });
+                        }
                     }
                     UiMessage::HideTerminal => {
                         window.set_show_terminal(false);
+                        window.set_show_progress_popup(false);
+                    }
+                    UiMessage::ShowProgressPopup(title) => {
+                        window.set_progress_popup_title(SharedString::from(&title));
+                        window.set_progress_popup_percent(0);
+                        window.set_progress_popup_stage(SharedString::from("Starting..."));
+                        window.set_progress_popup_done(false);
+                        window.set_progress_popup_success(false);
+                        window.set_show_progress_popup(true);
+                        window.set_show_terminal(false);
+                    }
+                    UiMessage::OperationProgress(percent, stage) => {
+                        window.set_progress_popup_percent(percent);
+                        window.set_progress_popup_stage(SharedString::from(&stage));
+                    }
+                    UiMessage::OperationDone(success) => {
+                        window.set_progress_popup_percent(100);
+                        window.set_progress_popup_done(true);
+                        window.set_progress_popup_success(success);
+                        // Clear selection after successful operation
+                        if success {
+                            window.set_selected_count(0);
+                        }
+                        // Refresh package lists
+                        if success {
+                            let tx = tx_timer.clone();
+                            let search_query = window.get_search_text().to_string();
+                            let current_view = window.get_view();
+                            let current_repo = window.get_current_repo_name().to_string();
+                            thread::spawn(move || {
+                                let rt = tokio::runtime::Runtime::new().expect("Runtime");
+                                rt.block_on(async {
+                                    load_packages_async(&tx).await;
+                                    if !search_query.is_empty() {
+                                        search_packages_async(&tx, &search_query).await;
+                                    }
+                                });
+                                if current_view == 8 && !current_repo.is_empty() {
+                                    load_repo_packages(&tx, &current_repo);
+                                }
+                            });
+                        }
+                    }
+                    UiMessage::ShowTerminalFallback(accumulated) => {
+                        // Switch from progress popup to terminal
+                        window.set_show_progress_popup(false);
+                        window.set_terminal_title(window.get_progress_popup_title());
+                        window.set_terminal_output(SharedString::from(""));
+                        window.set_terminal_done(false);
+                        window.set_terminal_success(false);
+                        window.set_show_terminal(true);
+                        pending_terminal.clear();
+                        pending_terminal.push_str(&accumulated);
+                        flush_now = true;
                     }
                 }
+            }
+
+            // Flush terminal output at most every 150ms (or immediately when done)
+            if !pending_terminal.is_empty()
+                && (flush_now || last_term_flush.elapsed() >= std::time::Duration::from_millis(150))
+            {
+                // Normalize any \r\n split across PTY read boundaries
+                let text = pending_terminal.replace("\r\n", "\n");
+                pending_terminal.clear();
+                let current = window.get_terminal_output().to_string();
+                let combined = apply_terminal_text(&current, &text);
+                let trimmed = if combined.len() > 16384 {
+                    combined[combined.len() - 16384..].to_string()
+                } else {
+                    combined
+                };
+                window.set_terminal_output(SharedString::from(&trimmed));
+                last_term_flush = std::time::Instant::now();
             }
         }
     });
@@ -552,7 +994,7 @@ fn main() {
         });
     });
 
-    // Install package callback
+    // Install package callback (called by confirm-operation)
     let tx_install = tx.clone();
     let install_input = terminal_input_sender.clone();
     let install_pid = terminal_child_pid.clone();
@@ -565,15 +1007,11 @@ fn main() {
 
         thread::spawn(move || {
             let title = format!("Installing {}", name);
-            if backend == 1 {
-                run_in_terminal(&tx, &title, "flatpak", &["install", &name], &input, &pid);
-            } else {
-                run_in_terminal(&tx, &title, "pkexec", &["pacman", "-S", &name], &input, &pid);
-            }
+            run_managed_operation(&tx, &title, "install", &[name], backend, &input, &pid);
         });
     });
 
-    // Remove package callback
+    // Remove package callback (called by confirm-operation)
     let tx_remove = tx.clone();
     let remove_input = terminal_input_sender.clone();
     let remove_pid = terminal_child_pid.clone();
@@ -586,15 +1024,11 @@ fn main() {
 
         thread::spawn(move || {
             let title = format!("Removing {}", name);
-            if backend == 1 {
-                run_in_terminal(&tx, &title, "flatpak", &["uninstall", &name], &input, &pid);
-            } else {
-                run_in_terminal(&tx, &title, "pkexec", &["pacman", "-R", &name], &input, &pid);
-            }
+            run_managed_operation(&tx, &title, "remove", &[name], backend, &input, &pid);
         });
     });
 
-    // Update package callback (single package)
+    // Update package callback (called by confirm-operation)
     let tx_upd = tx.clone();
     let upd_input = terminal_input_sender.clone();
     let upd_pid = terminal_child_pid.clone();
@@ -607,15 +1041,11 @@ fn main() {
 
         thread::spawn(move || {
             let title = format!("Updating {}", name);
-            if backend == 1 {
-                run_in_terminal(&tx, &title, "flatpak", &["update", &name], &input, &pid);
-            } else {
-                run_in_terminal(&tx, &title, "pkexec", &["pacman", "-S", &name], &input, &pid);
-            }
+            run_managed_operation(&tx, &title, "update", &[name], backend, &input, &pid);
         });
     });
 
-    // Update all callback - use pkexec for polkit authentication
+    // Update all callback - route through managed operation
     let tx_update = tx.clone();
     let update_all_input = terminal_input_sender.clone();
     let update_all_pid = terminal_child_pid.clone();
@@ -626,8 +1056,219 @@ fn main() {
         let pid = update_all_pid.clone();
 
         thread::spawn(move || {
-            run_in_terminal(&tx, "System Update", "pkexec", &["pacman", "-Syu"], &input, &pid);
+            run_managed_operation(&tx, "System Update", "update-all", &[], 0, &input, &pid);
         });
+    });
+
+    // Request install — show confirmation popup
+    let window_weak_ri = window.as_weak();
+    window.on_request_install(move |name, backend| {
+        if let Some(window) = window_weak_ri.upgrade() {
+            window.set_confirm_title(SharedString::from("Install Package"));
+            window.set_confirm_action(SharedString::from("install"));
+            window.set_confirm_package_names(name.clone());
+            window.set_confirm_version(SharedString::from(""));
+            window.set_confirm_size(SharedString::from(""));
+            window.set_confirm_deps(SharedString::from(""));
+            window.set_confirm_backend(backend);
+            window.set_confirm_package_count(1);
+            window.set_show_confirm_popup(true);
+        }
+    });
+
+    // Request remove — show confirmation popup
+    let window_weak_rr = window.as_weak();
+    window.on_request_remove(move |name, backend| {
+        if let Some(window) = window_weak_rr.upgrade() {
+            window.set_confirm_title(SharedString::from("Remove Package"));
+            window.set_confirm_action(SharedString::from("remove"));
+            window.set_confirm_package_names(name.clone());
+            window.set_confirm_version(SharedString::from(""));
+            window.set_confirm_size(SharedString::from(""));
+            window.set_confirm_deps(SharedString::from(""));
+            window.set_confirm_backend(backend);
+            window.set_confirm_package_count(1);
+            window.set_show_confirm_popup(true);
+        }
+    });
+
+    // Request update — show confirmation popup
+    let window_weak_ru = window.as_weak();
+    window.on_request_update(move |name, backend| {
+        if let Some(window) = window_weak_ru.upgrade() {
+            window.set_confirm_title(SharedString::from("Update Package"));
+            window.set_confirm_action(SharedString::from("update"));
+            window.set_confirm_package_names(name.clone());
+            window.set_confirm_version(SharedString::from(""));
+            window.set_confirm_size(SharedString::from(""));
+            window.set_confirm_deps(SharedString::from(""));
+            window.set_confirm_backend(backend);
+            window.set_confirm_package_count(1);
+            window.set_show_confirm_popup(true);
+        }
+    });
+
+    // Confirm operation — dispatch to actual operation via run_managed_operation
+    let tx_confirm = tx.clone();
+    let confirm_input = terminal_input_sender.clone();
+    let confirm_pid = terminal_child_pid.clone();
+    let window_weak_co = window.as_weak();
+    window.on_confirm_operation(move || {
+        if let Some(window) = window_weak_co.upgrade() {
+            let action = window.get_confirm_action().to_string();
+            let names_str = window.get_confirm_package_names().to_string();
+            let backend = window.get_confirm_backend();
+            window.set_show_confirm_popup(false);
+
+            let name_list: Vec<String> = names_str.split('\n').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+            let tx = tx_confirm.clone();
+            let input = confirm_input.clone();
+            let pid = confirm_pid.clone();
+
+            match action.as_str() {
+                "install" | "bulk-install" => {
+                    let title = if name_list.len() > 1 {
+                        format!("Installing {} packages", name_list.len())
+                    } else {
+                        format!("Installing {}", name_list.first().map(|s| s.as_str()).unwrap_or(""))
+                    };
+                    thread::spawn(move || {
+                        run_managed_operation(&tx, &title, "install", &name_list, backend, &input, &pid);
+                    });
+                }
+                "remove" | "bulk-remove" => {
+                    let title = if name_list.len() > 1 {
+                        format!("Removing {} packages", name_list.len())
+                    } else {
+                        format!("Removing {}", name_list.first().map(|s| s.as_str()).unwrap_or(""))
+                    };
+                    thread::spawn(move || {
+                        run_managed_operation(&tx, &title, "remove", &name_list, backend, &input, &pid);
+                    });
+                }
+                "update" => {
+                    let title = format!("Updating {}", names_str);
+                    thread::spawn(move || {
+                        run_managed_operation(&tx, &title, "update", &name_list, backend, &input, &pid);
+                    });
+                }
+                "update-all" => {
+                    thread::spawn(move || {
+                        run_managed_operation(&tx, "System Update", "update-all", &[], 0, &input, &pid);
+                    });
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Cancel confirm — hide popup
+    let window_weak_cc = window.as_weak();
+    window.on_cancel_confirm(move || {
+        if let Some(window) = window_weak_cc.upgrade() {
+            window.set_show_confirm_popup(false);
+        }
+    });
+
+    // Close progress popup
+    let window_weak_cp = window.as_weak();
+    window.on_close_progress_popup(move || {
+        if let Some(window) = window_weak_cp.upgrade() {
+            window.set_show_progress_popup(false);
+        }
+    });
+
+    // Toggle package selection
+    let selected_pkgs_toggle = selected_packages.clone();
+    let window_weak_tps = window.as_weak();
+    window.on_toggle_package_selected(move |name, backend, selected| {
+        let name_str = name.to_string();
+        let mut sel = selected_pkgs_toggle.borrow_mut();
+
+        if let Some(window) = window_weak_tps.upgrade() {
+            // Look up installed state from models
+            let is_installed = find_package_installed(&window, &name_str, backend);
+
+            if selected {
+                if !sel.iter().any(|(n, b, _)| n == &name_str && *b == backend) {
+                    sel.push((name_str.clone(), backend, is_installed));
+                }
+            } else {
+                sel.retain(|(n, b, _)| !(n == &name_str && *b == backend));
+            }
+
+            window.set_selected_count(sel.len() as i32);
+            let installed_count = sel.iter().filter(|(_, _, inst)| *inst).count() as i32;
+            window.set_selected_installed_count(installed_count);
+            window.set_selected_uninstalled_count(sel.len() as i32 - installed_count);
+            update_selection_in_models(&window, &name_str, backend, selected);
+        }
+    });
+
+    // Clear selection
+    let selected_pkgs_clear = selected_packages.clone();
+    let window_weak_cs = window.as_weak();
+    window.on_clear_selection(move || {
+        let mut sel = selected_pkgs_clear.borrow_mut();
+        let old_sel: Vec<(String, i32, bool)> = sel.drain(..).collect();
+        if let Some(window) = window_weak_cs.upgrade() {
+            window.set_selected_count(0);
+            window.set_selected_installed_count(0);
+            window.set_selected_uninstalled_count(0);
+            for (name, backend, _) in &old_sel {
+                update_selection_in_models(&window, name, *backend, false);
+            }
+        }
+    });
+
+    // Bulk install — collect only uninstalled packages, show confirm
+    let selected_pkgs_bi = selected_packages.clone();
+    let window_weak_bi = window.as_weak();
+    window.on_bulk_install(move || {
+        let sel = selected_pkgs_bi.borrow();
+        // Only include uninstalled packages
+        let uninstalled: Vec<&(String, i32, bool)> = sel.iter().filter(|(_, _, inst)| !inst).collect();
+        if uninstalled.is_empty() { return; }
+        let names: Vec<String> = uninstalled.iter().map(|(n, _, _)| n.clone()).collect();
+        let backend = uninstalled[0].1;
+        let names_str = names.join("\n");
+
+        if let Some(window) = window_weak_bi.upgrade() {
+            window.set_confirm_title(SharedString::from("Install Selected Packages"));
+            window.set_confirm_action(SharedString::from("bulk-install"));
+            window.set_confirm_package_names(SharedString::from(&names_str));
+            window.set_confirm_version(SharedString::from(""));
+            window.set_confirm_size(SharedString::from(""));
+            window.set_confirm_deps(SharedString::from(""));
+            window.set_confirm_backend(backend);
+            window.set_confirm_package_count(names.len() as i32);
+            window.set_show_confirm_popup(true);
+        }
+    });
+
+    // Bulk remove — collect only installed packages, show confirm
+    let selected_pkgs_br = selected_packages.clone();
+    let window_weak_br = window.as_weak();
+    window.on_bulk_remove(move || {
+        let sel = selected_pkgs_br.borrow();
+        // Only include installed packages
+        let installed: Vec<&(String, i32, bool)> = sel.iter().filter(|(_, _, inst)| *inst).collect();
+        if installed.is_empty() { return; }
+        let names: Vec<String> = installed.iter().map(|(n, _, _)| n.clone()).collect();
+        let backend = installed[0].1;
+        let names_str = names.join("\n");
+
+        if let Some(window) = window_weak_br.upgrade() {
+            window.set_confirm_title(SharedString::from("Remove Selected Packages"));
+            window.set_confirm_action(SharedString::from("bulk-remove"));
+            window.set_confirm_package_names(SharedString::from(&names_str));
+            window.set_confirm_version(SharedString::from(""));
+            window.set_confirm_size(SharedString::from(""));
+            window.set_confirm_deps(SharedString::from(""));
+            window.set_confirm_backend(backend);
+            window.set_confirm_package_count(names.len() as i32);
+            window.set_show_confirm_popup(true);
+        }
     });
 
     // Check for updates callback - syncs databases and checks all update sources
@@ -786,10 +1427,44 @@ fn main() {
         }
     });
 
-    // Terminal close callback — kills process if still running, then hides and refreshes
+    // Terminal close callback — kills process if still running, then hides
     let tx_close = tx.clone();
     let close_pid = terminal_child_pid.clone();
     let close_input = terminal_input_sender.clone();
+    // Troubleshoot: Update Mirrorlists
+    let tx_mirrors = tx.clone();
+    let mirror_input = terminal_input_sender.clone();
+    let mirror_pid = terminal_child_pid.clone();
+    window.on_update_mirrorlists(move || {
+        info!("Troubleshoot: Update Mirrorlists");
+        let tx = tx_mirrors.clone();
+        let input = mirror_input.clone();
+        let pid = mirror_pid.clone();
+        thread::spawn(move || {
+            let title = "Updating Mirrorlists".to_string();
+            run_in_terminal(&tx, &title, "pkexec", &["bash", "-c",
+                "rate-mirrors --allow-root --protocol https arch | tee /etc/pacman.d/mirrorlist && rate-mirrors --allow-root --protocol https chaotic-aur | tee /etc/pacman.d/chaotic-mirrorlist"
+            ], &input, &pid);
+        });
+    });
+
+    // Troubleshoot: Fix GnuPG Keyring
+    let tx_keyring = tx.clone();
+    let keyring_input = terminal_input_sender.clone();
+    let keyring_pid = terminal_child_pid.clone();
+    window.on_fix_keyring(move || {
+        info!("Troubleshoot: Fix GnuPG Keyring");
+        let tx = tx_keyring.clone();
+        let input = keyring_input.clone();
+        let pid = keyring_pid.clone();
+        thread::spawn(move || {
+            let title = "Fixing GnuPG Keyring".to_string();
+            run_in_terminal(&tx, &title, "pkexec", &["bash", "-c",
+                "rm -rf /etc/pacman.d/gnupg/* && pacman-key --init && pacman-key --populate && echo 'keyserver hkp://keyserver.ubuntu.com:80' | tee -a /etc/pacman.d/gnupg/gpg.conf && pacman -Syy --noconfirm archlinux-keyring"
+            ], &input, &pid);
+        });
+    });
+
     window.on_terminal_close(move || {
         info!("Terminal close requested");
         // Kill child process if still running
@@ -802,14 +1477,6 @@ fn main() {
         *close_input.lock().unwrap() = None;
 
         let _ = tx_close.send(UiMessage::HideTerminal);
-        // Refresh package list after terminal operation
-        let tx = tx_close.clone();
-        thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().expect("Runtime");
-            rt.block_on(async {
-                load_packages_async(&tx).await;
-            });
-        });
     });
 
     info!("Running application");
@@ -835,28 +1502,71 @@ async fn load_packages_async(tx: &mpsc::Sender<UiMessage>) {
         }
     };
 
-    // Load pacman packages
-    let installed_pacman = match alpm.list_installed().await {
-        Ok(pkgs) => pkgs,
-        Err(e) => {
-            error!("Failed to list installed packages: {}", e);
-            Vec::new()
-        }
-    };
+    // Run all data loading concurrently for fast startup
+    let installed_fut = alpm.list_installed();
+    let cache_fut = alpm.get_cache_size();
+    let orphans_fut = alpm.list_orphans();
+    let flatpak_avail_fut = flatpak.list_available();
+    let flatpak_updates_fut = flatpak.list_updates();
 
-    // Use checkupdates for reliable update detection (alpm has db lock issues)
+    // Spawn blocking tasks for sync operations in parallel
+    let checkupdates_fut = tokio::task::spawn_blocking(|| {
+        std::process::Command::new("checkupdates")
+            .output()
+            .or_else(|_| std::process::Command::new("pacman").args(["-Qu"]).output())
+    });
+    let plasmoid_fut = tokio::task::spawn_blocking(list_plasmoids_with_updates);
+    let firmware_fut = tokio::task::spawn_blocking(list_firmware);
+    let desktop_map_fut = tokio::task::spawn_blocking(build_desktop_name_map);
+    let flatpak_map_fut = tokio::task::spawn_blocking(build_flatpak_name_map);
+
+    // Await everything concurrently
+    let (
+        installed_res,
+        cache_res,
+        orphans_res,
+        flatpak_avail_res,
+        flatpak_updates_res,
+        checkupdates_res,
+        plasmoid_res,
+        firmware_res,
+        desktop_map_res,
+        flatpak_map_res,
+    ) = tokio::join!(
+        installed_fut,
+        cache_fut,
+        orphans_fut,
+        flatpak_avail_fut,
+        flatpak_updates_fut,
+        checkupdates_fut,
+        plasmoid_fut,
+        firmware_fut,
+        desktop_map_fut,
+        flatpak_map_fut,
+    );
+
+    // Process results
+    let installed_pacman = installed_res.unwrap_or_else(|e| { error!("Failed to list installed: {}", e); Vec::new() });
+    let cache_size = cache_res.unwrap_or(0);
+    let orphan_count = orphans_res.map(|o| o.len()).unwrap_or(0);
+
+    let flatpak_packages = flatpak_avail_res.unwrap_or_else(|e| { error!("Failed to list flatpak: {}", e); Vec::new() });
+    let flatpak_updates = flatpak_updates_res.unwrap_or_else(|e| { error!("Failed to list flatpak updates: {}", e); Vec::new() });
+
+    let (_installed_plasmoids, plasmoid_updates) = plasmoid_res.unwrap_or_else(|_| (Vec::new(), Vec::new()));
+    let firmware_packages = firmware_res.unwrap_or_else(|_| Vec::new());
+
+    let desktop_map = desktop_map_res.unwrap_or_default();
+    let flatpak_name_map = flatpak_map_res.unwrap_or_default();
+
+    // Parse checkupdates output
     let mut updates: Vec<xpm_core::package::UpdateInfo> = Vec::new();
-    let check_output = std::process::Command::new("checkupdates")
-        .output()
-        .or_else(|_| std::process::Command::new("pacman").args(["-Qu"]).output());
-
-    if let Ok(result) = check_output {
+    if let Ok(Ok(result)) = checkupdates_res {
         if result.status.success() {
             let stdout = String::from_utf8_lossy(&result.stdout);
             for line in stdout.lines() {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if parts.len() >= 4 {
-                    // checkupdates format: name old_ver -> new_ver
                     updates.push(xpm_core::package::UpdateInfo {
                         name: parts[0].to_string(),
                         current_version: xpm_core::package::Version::new(parts[1]),
@@ -866,7 +1576,6 @@ async fn load_packages_async(tx: &mpsc::Sender<UiMessage>) {
                         download_size: 0,
                     });
                 } else if parts.len() >= 2 {
-                    // pacman -Qu format: name new_ver
                     updates.push(xpm_core::package::UpdateInfo {
                         name: parts[0].to_string(),
                         current_version: xpm_core::package::Version::new(""),
@@ -880,47 +1589,10 @@ async fn load_packages_async(tx: &mpsc::Sender<UiMessage>) {
         }
     }
 
-    // Get update names for marking
     let update_names: std::collections::HashSet<String> =
         updates.iter().map(|u| u.name.clone()).collect();
-
-    // Load all available flatpak packages from remotes (Flathub etc)
-    let flatpak_packages = match flatpak.list_available().await {
-        Ok(pkgs) => pkgs,
-        Err(e) => {
-            error!("Failed to list flatpak packages: {}", e);
-            Vec::new()
-        }
-    };
-
-    // Load flatpak updates
-    let flatpak_updates = match flatpak.list_updates().await {
-        Ok(u) => u,
-        Err(e) => {
-            error!("Failed to list flatpak updates: {}", e);
-            Vec::new()
-        }
-    };
-
     let flatpak_update_names: std::collections::HashSet<String> =
         flatpak_updates.iter().map(|u| u.name.clone()).collect();
-
-    // Load plasmoids (for update checking only)
-    let (_installed_plasmoids, plasmoid_updates) = list_plasmoids_with_updates();
-
-    // Load firmware devices
-    let firmware_packages = list_firmware();
-
-    // KDE Store loaded on-demand, not at startup for speed
-
-    // Get cache size
-    let cache_size = alpm.get_cache_size().await.unwrap_or(0);
-
-    // Get orphan count
-    let orphan_count = alpm.list_orphans().await.map(|o| o.len()).unwrap_or(0);
-
-    // Build desktop name map for humanization (used by both installed and flatpak)
-    let desktop_map = build_desktop_name_map();
 
     // Convert to UI types
     let installed_ui: Vec<PackageData> = installed_pacman
@@ -929,9 +1601,6 @@ async fn load_packages_async(tx: &mpsc::Sender<UiMessage>) {
         .collect();
 
     let updates_ui: Vec<PackageData> = updates.iter().map(|u| update_to_ui(u)).collect();
-
-    // Build name map for Flatpak humanization
-    let flatpak_name_map = build_flatpak_name_map();
 
     let flatpak_ui: Vec<PackageData> = flatpak_packages
         .iter()
@@ -970,6 +1639,7 @@ async fn load_packages_async(tx: &mpsc::Sender<UiMessage>) {
                 dependencies: SharedString::from(""),
                 required_by: SharedString::from(""),
                 icon_name: SharedString::from(""),
+                selected: false,
             }
         })
         .collect();
@@ -1067,6 +1737,7 @@ fn list_plasmoids_with_updates() -> (Vec<PackageData>, Vec<PackageData>) {
                         dependencies: SharedString::from(""),
                         required_by: SharedString::from(""),
                         icon_name: SharedString::from(""),
+                        selected: false,
                     };
 
                     if has_update {
@@ -1199,6 +1870,7 @@ fn list_firmware() -> Vec<PackageData> {
                             dependencies: SharedString::from(""),
                             required_by: SharedString::from(""),
                             icon_name: SharedString::from(""),
+                            selected: false,
                         });
                     }
                 }
@@ -1368,6 +2040,7 @@ async fn search_packages_async(tx: &mpsc::Sender<UiMessage>, query: &str) {
                 dependencies: SharedString::from(""),
                 required_by: SharedString::from(""),
                 icon_name: SharedString::from(""),
+                selected: false,
             }
         })
         .collect();
@@ -1387,6 +2060,7 @@ async fn search_packages_async(tx: &mpsc::Sender<UiMessage>, query: &str) {
         dependencies: SharedString::from(""),
         required_by: SharedString::from(""),
         icon_name: SharedString::from(""),
+        selected: false,
     }));
 
     // Limit results
@@ -1508,6 +2182,7 @@ fn parse_desktop_file(path: &std::path::Path, target_category: &str) -> Option<P
         dependencies: SharedString::from(""),
         required_by: SharedString::from(""),
         icon_name: SharedString::from(""),
+        selected: false,
     })
 }
 
@@ -1669,6 +2344,7 @@ fn parse_appstream_xml<R: std::io::Read>(reader: R, target_category: &str, packa
                     dependencies: SharedString::from(""),
                     required_by: SharedString::from(""),
                     icon_name: SharedString::from(""),
+                    selected: false,
                 });
             }
             in_component = false;
@@ -1856,6 +2532,7 @@ fn load_repo_packages(tx: &std::sync::mpsc::Sender<UiMessage>, repo: &str) {
                             dependencies: SharedString::from(""),
                             required_by: SharedString::from(""),
                             icon_name: SharedString::from(""),
+                            selected: false,
                         })
                     } else {
                         None

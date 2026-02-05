@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
-use xpm_core::error::{Error, Result};
+use xpm_core::error::Result;
 
 /// Manages the pacman package cache.
 pub struct CacheManager {
@@ -92,7 +92,7 @@ impl CacheManager {
         }
 
         // Keep only the newest versions.
-        for (name, mut versions) in packages {
+        for (_name, mut versions) in packages {
             if versions.len() <= keep_versions {
                 continue;
             }

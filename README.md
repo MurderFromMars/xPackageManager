@@ -97,12 +97,9 @@ cargo run --bin xpm-ui
 
 ## TODO
 
-- [ ] Implement privileged operations via polkit
-- [ ] Add AUR support (via helper programs)
-- [ ] Package details dialog
-- [ ] Dependency tree visualization
-- [ ] System update notifications
-- [ ] Mirror ranking and selection
+- [ ] Ability to `downgrade` pkgs.
+- [ ] System update notifications.
+- [ ] Dependency tree visualization.
 
 ## License
 
