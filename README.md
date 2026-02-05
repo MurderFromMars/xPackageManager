@@ -2,6 +2,8 @@
 
 A modern package manager for Arch Linux supporting pacman (via libalpm) and Flatpak backends.
 
+<img width="1128" height="774" alt="image" src="https://github.com/user-attachments/assets/6a345d2b-2805-4324-a417-89d25fbd9395" />
+
 ## Features
 
 - **Dual Backend Support**: Manage both pacman packages and Flatpak applications from a single interface
