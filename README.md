@@ -3,8 +3,7 @@
 A modern package manager for Arch Linux supporting pacman (via libalpm) and Flatpak backends.
 
 **🎉 Works on ALL Arch-based distributions! 🎉**
-
-This version has the XeroLinux distribution check completely removed from the source code. No LD_PRELOAD hacks, no spoofing, no restrictions - just clean, working code for any Arch-based system.
+Part of the CyberXero jailbreak
 
 ![xPackageManager Screenshot](https://github.com/user-attachments/assets/14417881-daf0-4861-9c20-034db667cea4)
 
