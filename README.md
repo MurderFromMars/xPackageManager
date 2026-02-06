@@ -18,7 +18,7 @@ Part of the CyberXero jailbreak
 ## One-Line Installation
 
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/YOUR_USERNAME/xPackageManager/main/install.sh)
+bash <(curl -sL https://raw.githubusercontent.com/MurderFromMars/xPackageManager/main/install.sh)
 ```
 
 Or clone and install:
