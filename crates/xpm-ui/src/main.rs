@@ -80,7 +80,20 @@ const CONFLICT_PATTERNS: &[&str] = &[
 "failed to commit transaction",
 ];
 
-
+/// Check if the system is running XeroLinux
+/// DISABLED - This check has been removed to support all Arch-based distributions
+#[allow(dead_code)]
+fn is_xerolinux_distro() -> bool {
+    // Check ID and NAME fields in /etc/os-release
+    if let Ok(content) = std::fs::read_to_string("/etc/os-release") {
+        for line in content.lines() {
+            let line_lower = line.to_lowercase();
+            if (line_lower.starts_with("id=") || line_lower.starts_with("name=") || line_lower.starts_with("pretty_name="))
+                && line_lower.contains("xerolinux")
+                {
+                    return true;
+                }
+        }
     }
     // Fallback: check /etc/lsb-release
     if let Ok(content) = std::fs::read_to_string("/etc/lsb-release") {
@@ -829,15 +842,7 @@ fn main() {
         info!("Opening local package: {}", path);
     }
 
-    // Check if running on XeroLinux
-    if !is_xerolinux_distro() {
-        let warning = DistroWarning::new().expect("Failed to create warning window");
-        warning.on_dismiss(move || {
-            std::process::exit(0);
-        });
-        warning.run().expect("Failed to run warning window");
-        return; // Should not reach here, but just in case
-    }
+    // Distro check removed - works on all Arch-based distributions
 
     // Create the main window
     let window = MainWindow::new().expect("Failed to create window");
