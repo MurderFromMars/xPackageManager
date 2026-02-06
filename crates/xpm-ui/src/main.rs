@@ -80,18 +80,7 @@ const CONFLICT_PATTERNS: &[&str] = &[
 "failed to commit transaction",
 ];
 
-/// Check if the system is running XeroLinux
-fn is_xerolinux_distro() -> bool {
-    // Check ID and NAME fields in /etc/os-release
-    if let Ok(content) = std::fs::read_to_string("/etc/os-release") {
-        for line in content.lines() {
-            let line_lower = line.to_lowercase();
-            if (line_lower.starts_with("id=") || line_lower.starts_with("name=") || line_lower.starts_with("pretty_name="))
-                && line_lower.contains("xerolinux")
-                {
-                    return true;
-                }
-        }
+
     }
     // Fallback: check /etc/lsb-release
     if let Ok(content) = std::fs::read_to_string("/etc/lsb-release") {
