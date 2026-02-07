@@ -43,7 +43,7 @@ fi
 
 print_info "Installing to /opt/xpackagemanager/..."
 sudo mkdir -p /opt/xpackagemanager
-sudo install -Dm755 target/release/xpm-ui /opt/xpackagemanager/xpackagemanager
+sudo install -Dm755 target/release/xpackagemanager /opt/xpackagemanager/xpackagemanager
 sudo ln -sf /opt/xpackagemanager/xpackagemanager /usr/bin/xpackagemanager
 
 print_info "Installing desktop entry..."
