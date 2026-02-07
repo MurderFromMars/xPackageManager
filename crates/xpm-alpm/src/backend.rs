@@ -84,6 +84,37 @@ impl AlpmBackend {
         })
     }
 
+    /// Get available repositories from the sync database directory.
+    fn get_repos(dbpath: &str) -> Vec<String> {
+        let sync_path = Path::new(dbpath).join("sync");
+        if sync_path.exists() {
+            std::fs::read_dir(&sync_path)
+                .map(|entries| {
+                    entries
+                        .filter_map(|e| e.ok())
+                        .filter_map(|e| {
+                            let name = e.file_name().to_string_lossy().to_string();
+                            if name.ends_with(".db") {
+                                Some(name.trim_end_matches(".db").to_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_else(|_| vec!["core".to_string(), "extra".to_string()])
+        } else {
+            vec!["core".to_string(), "extra".to_string()]
+        }
+    }
+
+    /// Register all available sync databases on an ALPM handle.
+    fn register_repos(handle: &Alpm, dbpath: &str) {
+        let siglevel = SigLevel::PACKAGE_OPTIONAL | SigLevel::DATABASE_OPTIONAL;
+        for repo in Self::get_repos(dbpath) {
+            handle.register_syncdb(&repo, siglevel).ok();
+        }
+    }
 }
 
 #[async_trait]
@@ -108,11 +139,8 @@ impl PackageSource for AlpmBackend {
             let handle = Alpm::new(config.root.clone(), config.dbpath.clone())
                 .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
-            // Register sync databases.
-            let siglevel = SigLevel::PACKAGE_OPTIONAL | SigLevel::DATABASE_OPTIONAL;
-            for repo in ["core", "extra", "multilib", "xerolinux", "chaotic-aur"] {
-                handle.register_syncdb(repo, siglevel).ok();
-            }
+            // Register all available sync databases
+            AlpmBackend::register_repos(&handle, &config.dbpath);
 
             let mut results = Vec::new();
             let query_lower = query.to_lowercase();
@@ -196,50 +224,12 @@ impl PackageSource for AlpmBackend {
         let config = self.config.clone();
 
         tokio::task::spawn_blocking(move || {
-            // Use checkupdates approach: sync to temp db, then compare
-            // This doesn't require root privileges
-
-            let temp_dir = std::env::temp_dir().join("xpm-checkupdates");
-            let temp_dbpath = temp_dir.join("db");
-
-            // Create temp directory structure
-            std::fs::create_dir_all(&temp_dbpath).ok();
-
-            // Symlink local database to temp location (read-only)
-            let local_db_src = Path::new(&config.dbpath).join("local");
-            let local_db_dst = temp_dbpath.join("local");
-            if local_db_src.exists() && !local_db_dst.exists() {
-                std::os::unix::fs::symlink(&local_db_src, &local_db_dst).ok();
-            }
-
-            // Create handle with temp dbpath for syncing
-            let mut handle = Alpm::new(config.root.clone(), temp_dbpath.to_string_lossy().to_string())
+            // Use existing sync databases - user should run pacman -Sy to refresh
+            let handle = Alpm::new(config.root.clone(), config.dbpath.clone())
                 .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
-            // Register databases with mirror servers
-            let siglevel = SigLevel::PACKAGE_OPTIONAL | SigLevel::DATABASE_OPTIONAL;
-            let arch = "x86_64";
-            for repo in ["core", "extra", "multilib", "xerolinux", "chaotic-aur"] {
-                if let Ok(db) = handle.register_syncdb_mut(repo, siglevel) {
-                    match repo {
-                        "core" | "extra" | "multilib" => {
-                            db.add_server(format!("https://geo.mirror.pkgbuild.com/{}/os/{}", repo, arch)).ok();
-                        }
-                        "chaotic-aur" => {
-                            db.add_server(format!("https://geo-mirror.chaotic.cx/{}/{}", repo, arch)).ok();
-                        }
-                        "xerolinux" => {
-                            db.add_server(format!("https://repos.xerolinux.xyz/{}/{}", repo, arch)).ok();
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
-            // Sync all databases at once
-            if let Err(e) = handle.syncdbs_mut().update(false) {
-                warn!("Failed to sync databases: {}", e);
-            }
+            // Register all available sync databases
+            AlpmBackend::register_repos(&handle, &config.dbpath);
 
             let mut updates = Vec::new();
 
@@ -283,11 +273,8 @@ impl PackageSource for AlpmBackend {
             let handle = Alpm::new(config.root.clone(), config.dbpath.clone())
                 .map_err(|e| Error::DatabaseError(e.to_string()))?;
 
-            // Register sync databases.
-            let siglevel = SigLevel::PACKAGE_OPTIONAL | SigLevel::DATABASE_OPTIONAL;
-            for repo in ["core", "extra", "multilib", "xerolinux", "chaotic-aur"] {
-                handle.register_syncdb(repo, siglevel).ok();
-            }
+            // Register all available sync databases
+            AlpmBackend::register_repos(&handle, &config.dbpath);
 
             // Try local db first.
             if let Ok(pkg) = handle.localdb().pkg(name.as_bytes()) {
