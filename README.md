@@ -1,67 +1,81 @@
-# xPackageManager - Universal Arch Edition
+# xPackageManager — CyberXero Edition
 
-A modern package manager for Arch Linux supporting pacman (via libalpm) and Flatpak backends.
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/14417881-daf0-4861-9c20-034db667cea4" alt="xPackageManager Screenshot" width="800">
+</p>
 
-**🎉 Works on ALL Arch-based distributions! 🎉**
-Part of the CyberXero jailbreak
+<p align="center">
+  <strong>A modern package manager for Arch Linux — unlocked for all distributions</strong>
+</p>
 
-![xPackageManager Screenshot](https://github.com/user-attachments/assets/14417881-daf0-4861-9c20-034db667cea4)
+<p align="center">
+  <a href="#installation">Install</a> •
+  <a href="#features">Features</a> •
+  <a href="#whats-changed">What's Changed</a> •
+  <a href="#cyberxero-toolkit">Toolkit Integration</a>
+</p>
+
+---
+
+## Overview
+
+xPackageManager is a Qt6-based graphical package manager supporting both **pacman** (via libalpm) and **Flatpak** backends. Originally exclusive to XeroLinux, this fork removes the distribution restriction at the source level — no hacks, no workarounds, just clean code.
+
+**Part of the [CyberXero Toolkit](https://github.com/MurderFromMars/CyberXero-Toolkit) ecosystem.**
 
 ## Features
 
-- **Dual Backend Support**: Manage both pacman packages and Flatpak applications from a single interface
-- **Modern Qt 6 UI**: Built with QML and Qt Quick Controls 2 for a native desktop experience
-- **Rust Backend**: Safe, fast, and concurrent package management operations
-- **System Maintenance**: Orphan detection, cache cleanup, and database synchronization
-- **Universal Compatibility**: Works on any Arch-based distribution (Arch, Manjaro, EndeavourOS, Garuda, etc.)
+- **Dual Backend Support** — Manage pacman and Flatpak packages from one interface
+- **Modern Qt6 UI** — Native desktop experience with QML and Qt Quick
+- **Rust Backend** — Safe, fast, concurrent package operations
+- **System Maintenance** — Orphan detection, cache cleanup, database sync
+- **Universal Compatibility** — Works on any Arch-based distribution
 
-## One-Line Installation
+## Installation
+
+### One-Liner
 
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/MurderFromMars/xPackageManager/main/install.sh)
 ```
 
-Or clone and install:
+### Via CyberXero Toolkit
+
+Install through the toolkit GUI under **Servicing → System Tweaks → xPackageManager**.
+
+### Manual
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/xPackageManager.git
+git clone https://github.com/MurderFromMars/xPackageManager.git
 cd xPackageManager
 ./install.sh
 ```
 
-## What You Get
+The installer handles everything:
+- ✅ Installs build dependencies (rust, qt6-base, qt6-declarative)
+- ✅ Compiles from source with the patch applied
+- ✅ Installs to `/opt/xpackagemanager/`
+- ✅ Creates desktop entry and polkit policy
+- ✅ No root required to run — uses polkit for privileged operations
 
-After installation, you can launch xPackageManager:
+## Usage
 
-- **From terminal**: `xpackagemanager`
-- **From app menu**: Search for "xPackage Manager"
+**Terminal:**
+```bash
+xpackagemanager
+```
 
-The installer will:
-1. ✅ Check and install dependencies automatically
-2. ✅ Build the project from source
-3. ✅ Install to `/opt/xpackagemanager/`
-4. ✅ Create desktop integration
-5. ✅ No root required to run (uses polkit for privileged operations)
-
-## Requirements
-
-The install script will automatically install these if missing:
-
-- `rust` - Rust compiler and cargo
-- `qt6-base` - Qt 6 base libraries
-- `qt6-declarative` - Qt Quick/QML support
-- `pacman` - Already installed on Arch
-- `flatpak` - Flatpak support
+**Application Menu:** Search for "xPackage Manager"
 
 ## Uninstallation
 
 ```bash
+git clone https://github.com/MurderFromMars/xPackageManager.git
 cd xPackageManager
 ./uninstall.sh
 ```
 
 Or manually:
-
 ```bash
 sudo rm -f /usr/bin/xpackagemanager
 sudo rm -rf /opt/xpackagemanager
@@ -70,13 +84,12 @@ sudo rm -f /usr/share/mime/packages/x-alpm-package.xml
 sudo rm -f /usr/share/polkit-1/actions/org.xpackagemanager.policy
 ```
 
-## What Changed from Original?
+## What's Changed
 
-This fork removes the XeroLinux distribution check from the source code.
+This fork applies a single, clean patch — removing the distribution check from the source code.
 
-**Original code** (`crates/xpm-ui/src/main.rs:844`):
+**Original** (`crates/xpm-ui/src/main.rs`):
 ```rust
-// Check if running on XeroLinux
 if !is_xerolinux_distro() {
     let warning = DistroWarning::new().expect("Failed to create warning window");
     warning.on_dismiss(move || {
@@ -87,17 +100,47 @@ if !is_xerolinux_distro() {
 }
 ```
 
-**Patched code**:
+**Patched:**
 ```rust
-// Distro check removed - works on all Arch-based distributions
+// Distribution check removed — works on all Arch-based systems
 ```
 
-That's it! Simple, clean, and effective. The distribution check is completely removed at the source level.
+That's it. No binary patching, no LD_PRELOAD tricks, no system file modifications. Your `/etc/os-release` and `/etc/lsb-release` stay untouched.
+
+## Tested Distributions
+
+| Distribution | Status |
+|--------------|--------|
+| Arch Linux | ✅ Works |
+| EndeavourOS | ✅ Works |
+| Manjaro | ✅ Works |
+| Garuda Linux | ✅ Works |
+| ArcoLinux | ✅ Works |
+| CachyOS | ✅ Works |
+| XeroLinux | ✅ Works |
+
+Any Arch-based distribution with pacman should work.
+
+## CyberXero Toolkit
+
+This package is part of the **CyberXero Toolkit** — a comprehensive system management suite for Arch Linux.
+
+**Install via Toolkit:**
+1. Launch CyberXero Toolkit
+2. Navigate to **Servicing** tab
+3. Find **xPackageManager** under System Tweaks
+4. Click **Install**
+
+The toolkit handles dependencies, building, and installation automatically.
+
+**Other CyberXero Projects:**
+- [CyberXero Toolkit](https://github.com/MurderFromMars/CyberXero-Toolkit) — System management GUI
+- [CyberXero Desktop](https://github.com/MurderFromMars/CyberXero) — Cyberpunk KDE Plasma theme
 
 ## Building from Source
 
 ```bash
-# Development
+# Development build
 cargo run --bin xpm-ui
 
 # Release build
@@ -105,57 +148,42 @@ cargo build --release
 ./target/release/xpm-ui
 ```
 
-## Tested Distributions
+## Architecture
 
-✅ Arch Linux
-✅ Manjaro
-✅ EndeavourOS  
-✅ Garuda Linux
-✅ ArcoLinux
-✅ XeroLinux
-✅ Any Arch-based distribution with pacman
+| Crate | Purpose |
+|-------|---------|
+| `xpm-core` | Core types and traits |
+| `xpm-alpm` | Pacman/libalpm backend |
+| `xpm-flatpak` | Flatpak backend |
+| `xpm-service` | Service layer orchestrating backends |
+| `xpm-ui` | Qt/QML user interface |
 
 ## FAQ
 
-**Q: Will XeroLinux-specific repositories work?**
-A: The code includes optional support for the `xerolinux` and `chaotic-aur` repositories. If these repos aren't on your system, they're simply skipped.
+**Q: Will XeroLinux repositories work?**  
+A: The code includes optional support for `xerolinux` and `chaotic-aur` repos. If they're not configured on your system, they're simply skipped.
 
-**Q: Do I need to modify system files?**
-A: No! The distribution check has been removed from the source code. Your `/etc/os-release` stays untouched.
+**Q: Does this modify system files?**  
+A: No. The distribution check is removed at compile time. Your system configuration stays untouched.
 
-**Q: Is this safe?**
-A: Yes. This is a source-level patch that removes a single `if` statement. No binary patching, no LD_PRELOAD tricks, just clean code.
+**Q: Is this safe?**  
+A: Yes. This is a source-level patch that removes a single conditional. The rest of the codebase is unchanged.
 
-**Q: Can I contribute?**
-A: Absolutely! Pull requests welcome.
-
-## Architecture
-
-The project is organized into several crates:
-
-- **xpm-core**: Core types and traits
-- **xpm-alpm**: Pacman/libalpm backend
-- **xpm-flatpak**: Flatpak backend
-- **xpm-service**: Service layer orchestrating backends
-- **xpm-ui**: Qt/QML user interface
-
-For detailed architecture information, see `README.md.original`.
+**Q: Can I contribute?**  
+A: Pull requests welcome!
 
 ## Credits
 
-- **Original xPackageManager**: XeroLinux team
-- **Universal Arch Edition**: Community fork for all Arch-based distributions
-- **Built with**: Rust, Qt 6, Slint UI framework
+- **Original xPackageManager** — XeroLinux team
+- **CyberXero Edition** — [MurderFromMars](https://github.com/MurderFromMars)
+- **Built with** — Rust, Qt 6, Slint UI
 
 ## License
 
 GPL-3.0-or-later (same as original)
 
-## Support
-
-- **Issues with this fork**: Open an issue on this repository
-- **General xPackageManager questions**: Refer to original XeroLinux documentation
-
 ---
 
-**Note**: This is an independent community fork focused on removing distribution restrictions. For the official XeroLinux version, visit their official repositories.
+<p align="center">
+  <strong>CyberXero Edition</strong> — Part of the CyberXero ecosystem
+</p>
