@@ -636,27 +636,6 @@ export component MainWindow inherits Window {
 
                 Rectangle { height: 1px; background: Palette.border; }
 
-                // Database sync notice
-                Rectangle {
-                    height: 32px;
-                    border-radius: 6px;
-                    background: #e67e22.with-alpha(0.15);
-                    HorizontalLayout {
-                        padding-left: 12px;
-                        padding-right: 12px;
-                        spacing: 8px;
-                        alignment: center;
-                        Text { text: "⚠"; font-size: 13px; vertical-alignment: center; }
-                        Text {
-                            text: "Click \"Check for Updates\" in the sidebar to sync databases & check for any available updates";
-                            font-size: 11.5px;
-                            color: Palette.foreground;
-                            opacity: 0.8;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-
                 if loading: VerticalLayout {
                     vertical-stretch: 1;
                     alignment: center;
