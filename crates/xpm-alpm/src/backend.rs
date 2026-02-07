@@ -112,7 +112,7 @@ impl AlpmBackend {
     fn register_repos(handle: &Alpm, dbpath: &str) {
         let siglevel = SigLevel::PACKAGE_OPTIONAL | SigLevel::DATABASE_OPTIONAL;
         for repo in Self::get_repos(dbpath) {
-            handle.register_syncdb(&repo, siglevel).ok();
+            handle.register_syncdb(repo.as_str(), siglevel).ok();
         }
     }
 }
