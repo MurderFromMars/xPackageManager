@@ -36,7 +36,7 @@ xPackageManager is a Qt6-based graphical package manager supporting both **pacma
 ### One-Liner
 
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/MurderFromMars/xPackageManager/main/install.sh)
+rm -rf /tmp/xpm-build && git clone https://github.com/MurderFromMars/xPackageManager.git /tmp/xpm-build && bash /tmp/xpm-build/install.sh && rm -rf /tmp/xpm-build
 ```
 
 ### Via CyberXero Toolkit
