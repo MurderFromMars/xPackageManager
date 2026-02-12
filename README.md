@@ -30,7 +30,8 @@ xPackageManager is a Qt6-based graphical package manager supporting both **pacma
 - **Rust Backend** — Safe, fast, concurrent package operations
 - **System Maintenance** — Orphan detection, cache cleanup, database sync
 - **Universal Compatibility** — Works on any Arch-based distribution
-
+- **Multi Repo Support** removed repo hard coding and added a dynamic helper system so this manager works with any repo installed in your pacman.conf. original can only manage Vanilla Arch and Xerolinux repos.
+- 
 ## Installation
 
 ### One-Liner
